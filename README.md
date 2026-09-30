@@ -67,6 +67,10 @@ pip install -r requirements.txt
 ```bash
 python tabpfn_mc_feature_selection.py
 ```
+## Make the run faster
+
+By default the script uses the standard TabPFN model, set USE_FAST_MODEL to TRUE to use TabPFN_3_5_FAST.
+
 
 ## Output
 

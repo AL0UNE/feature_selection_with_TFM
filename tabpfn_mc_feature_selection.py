@@ -28,6 +28,9 @@ DEVICE = "auto"
 N_SPLITS = 5 ## nombre de split pour la cross-val utilisée pour la feature selection (ici backward)
 N_JOBS_CV = 1 ## nombre de job pour la cross-val utilisée pour la feature selection (ici backward)
 
+USE_FAST_MODEL = False ## True means TabPFNv3_5 is used instead of standard TabPFN
+
+
 TOL = 0.0 ## tolerance pour arrêter la méthode de séléction de variables
 SEED = 20260929
 
@@ -64,21 +67,23 @@ def read_csv(path):
     return df
 
 
-def model_fast(seed):
-    return TabPFNClassifier.create_default_for_version(
-        ModelVersion.V3_5_FAST,
+def make_model(seed):
+    if USE_FAST_MODEL:
+        return TabPFNClassifier.create_default_for_version(
+            ModelVersion.V3_5_FAST,
+            n_estimators=1,
+            device=DEVICE,
+            random_state=seed,
+            show_progress_bar=False,
+            memory_saving_mode="auto",
+        )
+
+    return TabPFNClassifier(
         n_estimators=1,
         device=DEVICE,
         random_state=seed,
         show_progress_bar=False,
         memory_saving_mode="auto",
-    )
-
-def model(seed):
-    return TabPFNClassifier(
-        n_estimators=1,
-        device=DEVICE,
-        random_state=seed,
     )
 
 
@@ -126,17 +131,16 @@ def analyse(path, n):
 
     # TabPFN backward sequential feature selection
     fs = SequentialFeatureSelector(
-        estimator=model(seed), ## change to model_fast(seed) for TabPFNv3_5 Fast
-        X=X,
-        y=y,
+        estimator=make_model(seed), ## change to model_fast(seed) for TabPFNv3_5 Fast
         n_features_to_select="auto",
         direction="backward",
         scoring="neg_brier_score",
         cv=cv,
         tol=TOL,
         n_jobs=N_JOBS_CV,
-        verbose=False,
     )
+
+    fs.fit(X,y)
 
     support = fs.get_support()
     selected_names = [
@@ -149,7 +153,7 @@ def analyse(path, n):
 
 
     # Apparent probabilities on the same development dataset
-    final_model = model(seed)
+    final_model = make_model(seed)
     final_model.fit(X_sel, y)
 
     proba = final_model.predict_proba(X_sel)
