@@ -2,16 +2,20 @@ from pathlib import Path
 import re
 import time
 
+import warnings
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
-
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.feature_selection import SequentialFeatureSelector
 
-#from tabpfn import TabPFNClassifier
-#from tabpfn_extensions.interpretability.feature_selection import feature_selection
+from sklearn.exceptions import ConvergenceWarning
+
+from tabpfn import TabPFNClassifier
+from tabpfn.constants import ModelVersion
+
+
 
 # =============================================================================
 # SETTINGS
@@ -19,10 +23,12 @@ from sklearn.feature_selection import SequentialFeatureSelector
 DATA_ROOT = Path("data")          # data/n40/, data/n248/, data/n496/, data/n992/
 OUTPUT_ROOT = Path("results")
 SAMPLE_SIZES = [40, 248, 496, 992]
-DEVICE = "auto"
-N_SPLITS = 5 ## nombre de split pour la cross-val utilisée dans la méthode de sélection de variables (ici backward)
 
-TOL = 0.0
+DEVICE = "auto" 
+N_SPLITS = 5 ## nombre de split pour la cross-val utilisée pour la feature selection (ici backward)
+N_JOBS_CV = 1 ## nombre de job pour la cross-val utilisée pour la feature selection (ici backward)
+
+TOL = 0.0 ## tolerance pour arrêter la méthode de séléction de variables
 SEED = 20260929
 
 BIOMARKERS = [
@@ -58,19 +64,53 @@ def read_csv(path):
     return df
 
 
+def model_fast(seed):
+    return TabPFNClassifier.create_default_for_version(
+        ModelVersion.V3_5_FAST,
+        n_estimators=1,
+        device=DEVICE,
+        random_state=seed,
+        show_progress_bar=False,
+        memory_saving_mode="auto",
+    )
+
 def model(seed):
-    return GradientBoostingClassifier(
-        n_estimators=10,
-        learning_rate=0.05,
-        max_depth=3,
+    return TabPFNClassifier(
+        n_estimators=1,
+        device=DEVICE,
         random_state=seed,
     )
-#def model(seed):
-#    return TabPFNClassifier(
-#        n_estimators=1,
-#        device=DEVICE,
-#        random_state=seed,
-#    )
+
+
+
+def calibration_slope(y, p_pred):
+
+    p = np.clip(p_pred, 1e-6, 1 - 1e-6)
+    logit_p = np.log(p / (1 - p)).reshape(-1, 1)
+
+    cal_model = LogisticRegression(
+        penalty=None,
+        solver="lbfgs",
+        max_iter=1000,
+    )
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "error",
+                category=ConvergenceWarning,
+            )
+            cal_model.fit(logit_p, y)
+
+        slope = float(cal_model.coef_[0, 0])
+
+        if not np.isfinite(slope):
+            return np.nan
+
+        return slope
+
+    except (ValueError, ConvergenceWarning):
+        return np.nan
+
 
 
 def analyse(path, n):
@@ -86,44 +126,52 @@ def analyse(path, n):
 
     # TabPFN backward sequential feature selection
     fs = SequentialFeatureSelector(
-        estimator=model(seed),
+        estimator=model(seed), ## change to model_fast(seed) for TabPFNv3_5 Fast
+        X=X,
+        y=y,
         n_features_to_select="auto",
         direction="backward",
         scoring="neg_brier_score",
         cv=cv,
         tol=TOL,
-        n_jobs=-1,
+        n_jobs=N_JOBS_CV,
+        verbose=False,
     )
 
-    fs.fit(X, y)
-    # Variables selected by sklearn SFS
     support = fs.get_support()
-
     selected_names = [
-        name
-        for name, keep in zip(BIOMARKERS, support)
+        name for name, keep in zip(BIOMARKERS, support)
         if keep
     ]
 
     selected = set(selected_names)
     X_sel = X[:, support]
 
+
     # Apparent probabilities on the same development dataset
     final_model = model(seed)
     final_model.fit(X_sel, y)
+
     proba = final_model.predict_proba(X_sel)
     p_pred = proba[:, list(final_model.classes_).index(1)]
 
+    slope = calibration_slope(y,p_pred)
+
     row = {
+
         "replication": rep,
         "n": n,
+
         "n_selected": len(selected),
         "n_true_selected": len(selected & TRUE_PANEL),
         "n_false_positive": len(selected - TRUE_PANEL),
         "all_four_true": int(TRUE_PANEL <= selected),
         "exact_panel": int(selected == TRUE_PANEL),
+
         "auc_apparent": roc_auc_score(y, p_pred),
         "rmse_ptrue": np.sqrt(np.mean((p_pred - p_true) ** 2)),
+        "calibration_slope": slope,
+
         "selected_features": ";".join(sorted(selected)),
     }
     row.update({f"sel_{x}": int(x in selected) for x in BIOMARKERS})
@@ -145,7 +193,7 @@ def make_summaries(results, n, folder):
         "all_four_true_rate": results.all_four_true.mean(),
         "exact_panel_rate": results.exact_panel.mean(),
     }
-    for col in ["n_true_selected", "n_false_positive", "auc_apparent", "rmse_ptrue"]:
+    for col in ["n_selected", "n_true_selected", "n_false_positive", "auc_apparent", "rmse_ptrue", "calibration_slope"]:
         summary[col + "_mean"] = results[col].mean()
         summary[col + "_sd"] = results[col].std()
         summary[col + "_median"] = results[col].median()
@@ -194,6 +242,7 @@ for n in SAMPLE_SIZES:
                 f"rep {rep}: k={row['n_selected']} "
                 f"TP={row['n_true_selected']} FP={row['n_false_positive']} "
                 f"AUC={row['auc_apparent']:.3f} RMSE={row['rmse_ptrue']:.4f} "
+                f"slope={row['calibration_slope']:.3f} "
                 f"time={time.time()-t0:.1f}s"
             )
         except Exception as e:
