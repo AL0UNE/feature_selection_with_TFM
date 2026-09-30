@@ -33,6 +33,8 @@ The true biomarker panel is:
 
 ## Data structure
 
+Data can be downloaded at the following link: https://drive.google.com/drive/folders/1J_3n6Mwn04CVDX1TvJAPSRztrpMHwUdk?usp=sharing
+
 The expected folder structure is:
 
 ```text
